@@ -1,30 +1,29 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Brokerage Agent</title>
-<link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#0b0b0b" />
-<link rel="apple-touch-icon" href="/icons/icon-192.png" />
-<link rel="stylesheet" href="/agent/style.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Brokerage Trade Agent</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#0b0b0b" />
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-<header class="appbar">
-<div class="title">Brokerage Agent</div>
-<button id="installBtn" class="ghost" aria-label="Install">⤓</button>
-</header>
+  <header class="appbar">
+    <div class="title">Brokerage Trade Agent</div>
+    <button id="installBtn" class="ghost" aria-label="Install">⤓</button>
+  </header>
 
+  <main class="chat" id="chat">
+    <div class="msg assistant"><div class="bubble">
+      Tap <strong>Run Trade Agent</strong> to generate today’s plan in your exact format.
+    </div></div>
+  </main>
 
-<main id="chat" class="chat"></main>
+  <div class="toolbar">
+    <button id="runBtn" class="primary">Run Trade Agent</button>
+  </div>
 
-
-<form id="composer" class="composer" autocomplete="off">
-<textarea id="input" rows="1" placeholder="Ask the Agent…" required></textarea>
-<button id="send" class="primary" type="submit">Send</button>
-</form>
-
-
-<script src="/agent/main.js" type="module"></script>
+  <script type="module" src="/main.js"></script>
 </body>
 </html>

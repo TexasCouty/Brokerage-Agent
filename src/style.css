@@ -27,3 +27,9 @@ button.ghost { background: transparent; }
 
 
 @media (min-width: 768px) { .chat { max-width: 780px; margin: 0 auto; } }
+
+.toolbar {
+  position: sticky; bottom: 0; display:flex; gap:8px; padding: 8px;
+  background: rgba(11,11,11,.9); backdrop-filter: blur(8px);
+  border-top:1px solid var(--border); justify-content:center;
+}
