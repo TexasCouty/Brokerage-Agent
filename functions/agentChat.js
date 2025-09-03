@@ -77,17 +77,64 @@ exports.handler = async (event) => {
     }
 
     // Build prompt (concise, with strict sections the README lists)
-    const prompt = [
-      "You are a brokerage trade agent.",
-      "Using the provided STATE JSON, produce a concise daily trade plan with these sections:",
-      "📊 Market Pulse • 💵 Cash Deployment • 1) Portfolio Snapshot • 2) Entry Radar • 3) Research",
-      "Be explicit on triggers (levels/volume/flow). Keep it actionable.",
-      "",
-      "STATE JSON:",
-      JSON.stringify(state)
-    ].join("\n");
+const prompt = `
+You are a Brokerage Trade Agent. Using the provided STATE JSON, generate today’s plan **strictly in the exact format below**. 
+Do not include explanations or extra sections. Use the same emojis, icons, and section names exactly as shown.
 
-    log("prompt-built", { promptLen: prompt.length });
+FORMAT (follow literally):
+
+📊 Market Pulse (Summary)
+
+(Performance vs. relevant index — 🟢 outperform · 🟡 in line · 🔴 lagging)
+
+AMZN (Nasdaq) 🟡 — in line with Nasdaq, modest gain.
+NVDA (Nasdaq) 🟢 — outperforming Nasdaq, steady above $180.
+MSFT (Nasdaq) 🔴 — lagging Nasdaq, stuck below $510.
+KTOS (Defense / ITA) 🟢 — outperforming ITA ETF, holding ~$68.
+LRCX (Semis / SOX) 🟢 — stronger than SOX, trading >$103.
+PLTR (Nasdaq) 🟡 — moving with Nasdaq around $157.
+CRWV (AI infra small-cap) 🔴 — lagging peers.
+BMNR (Speculative / R2K) 🔴 — underperforming Russell 2000.
+AVAV (Defense / ITA) 🟡 — in line with ITA ETF, stable ~$241.
+AVGO (Semis / SOX) 🟢 — outperforming SOX, climbing toward $300.
+CRDO (Semis / SOX) 🟢 — outperforming SOX, firm above $122.
+
+Summary: 🟢 5 outperforming · 🟡 3 in line · 🔴 3 lagging
+
+💵 Cash Deployment Tracker
+
+Brokerage sleeve total value: ≈ $115,000
+Cash available: $43,647.89 (~38%)
+Invested (stocks): ≈ $71,350 (~62%)
+Active triggers today (strict): None
+Playbook: Healthy 38% cash buffer. Deploy $5–10k per conviction setup on breakouts or dips; keep flexibility with high cash ratio.
+
+1) Portfolio Snapshot — Owned Positions
+
+(Write one block per ticker in the same style:)
+
+AMZN — 🟡 $231.7 | Sentiment: Bullish 🐂 [⏸️ HOLD]
+• Position: 75 @ 212.22 | P/L +9.2%
+• Flow: Balanced; no sweeps today.
+• Resistance: 235–240
+• Breakout watch: >240 → 245–250
+• Idea: Hold—enter only on confirmed breakout.
+
+… repeat for each ticker in STATE.positions …
+
+2) Entry Radar — Watchlist (No positions yet)
+
+… repeat in the same style for STATE.watchlist …
+
+3) Research — Bullish Sector Picks
+
+… repeat in the same style for STATE.research …
+
+END FORMAT
+
+STATE JSON:
+${JSON.stringify(state)}
+`;
 
     // Call OpenAI
     let upstream;
