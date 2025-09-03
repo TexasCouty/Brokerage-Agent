@@ -1,53 +1,57 @@
-// src/main.js — minimal, robust button binding + JSON-or-text handling
+// src/main.js — minimal UI: title + yellow button + result
 
 (function () {
-  // ---- DOM helpers ----
-  const $ = (sel) => document.querySelector(sel);
+  const $ = (s) => document.querySelector(s);
   const byId = (id) => document.getElementById(id);
 
-  function ensure(elId, tag = "div") {
-    let el = byId(elId);
-    if (!el) {
-      el = document.createElement(tag);
-      el.id = elId;
-      (document.querySelector(".chat") || document.body).appendChild(el);
+  function sanitize(s = "") {
+    return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  }
+
+  // Ensure an output container exists (empty at first)
+  function ensureOutput() {
+    let out = byId("output");
+    if (!out) {
+      out = document.createElement("div");
+      out.id = "output";
+      (document.querySelector(".chat") || document.body).appendChild(out);
     }
-    return el;
+    return out;
   }
 
-  const statusWrap = ensure("status-wrap");
-  const output = ensure("output");
-
-  // ---- chips ----
-  function chip(id, text, warn = false) {
-    let el = byId(id);
-    if (!el) {
-      el = document.createElement("div");
-      el.id = id;
-      el.className = "chip" + (warn ? " chip-warn" : "");
-      statusWrap.appendChild(el);
+  function setButtonBusy(btn, busy) {
+    const label = btn.querySelector(".btn-label") || btn;
+    let spin = btn.querySelector(".btn-spinner");
+    if (busy) {
+      btn.disabled = true;
+      if (!spin) {
+        spin = document.createElement("span");
+        spin.className = "btn-spinner";
+        label.insertAdjacentElement("afterend", spin);
+      }
+      spin.style.display = "inline-block";
+      label.textContent = "Running…";
+    } else {
+      btn.disabled = false;
+      if (spin) spin.style.display = "none";
+      label.textContent = "Run Trade Agent";
     }
-    el.textContent = text;
-    el.style.display = "inline-flex";
-  }
-  function hide(id) { const el = byId(id); if (el) el.style.display = "none"; }
-  function hideAll() {
-    ["chip-loading-state", "chip-generating", "chip-non-json", "chip-error"].forEach(hide);
   }
 
-  // ---- rendering ----
-  function sanitize(s="") {
-    return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
-  }
   function renderPlan(text) {
-    output.innerHTML = `<pre class="bubble markdown">${sanitize(String(text || ""))}</pre>`;
-  }
-  function renderError(msg) {
-    chip("chip-error", "Error", true);
-    output.innerHTML = `<div class="bubble"><div style="font-weight:700;margin-bottom:6px">Something went wrong</div><pre class="code" style="white-space:pre-wrap">${sanitize(String(msg))}</pre></div>`;
+    const out = ensureOutput();
+    out.innerHTML = `<pre class="bubble markdown">${sanitize(String(text || ""))}</pre>`;
   }
 
-  // ---- network ----
+  function renderError(message) {
+    const out = ensureOutput();
+    out.innerHTML = `
+      <div class="bubble">
+        <div style="font-weight:700;margin-bottom:6px">Something went wrong</div>
+        <pre class="code" style="white-space:pre-wrap">${sanitize(String(message))}</pre>
+      </div>`;
+  }
+
   async function getState() {
     const r = await fetch("/.netlify/functions/tradeState");
     const t = await r.text();
@@ -65,7 +69,6 @@
     const t = await r.text();
 
     if (!r.ok) {
-      // function should return JSON on errors; show it if present
       try {
         const j = JSON.parse(t);
         const msg = `agentChat error ${r.status}` + (j?.error ? ` — ${j.error}` : "");
@@ -75,48 +78,46 @@
       }
     }
 
-    // Try JSON first
+    // Prefer JSON { plan }, but gracefully accept text
     try {
       const j = JSON.parse(t);
-      if (j && typeof j.plan === "string") return j.plan;
+      if (typeof j.plan === "string") return j.plan;
       return JSON.stringify(j, null, 2);
     } catch {
-      chip("chip-non-json", "Non-JSON reply", true);
       return t;
     }
   }
 
-  // ---- main flow ----
   async function run() {
-    hideAll();
+    const btn = byId("run-btn") || document.querySelector(".primary");
+    if (!btn) return console.error("Run button not found");
+
+    // Minimal UI: clear output area (keep title + button)
+    ensureOutput().innerHTML = "";
+    setButtonBusy(btn, true);
+
     try {
-      chip("chip-loading-state", "Loading state…");
       const state = await getState();
-      hide("chip-loading-state");
-
-      chip("chip-generating", "Generating plan…");
       const plan = await callAgent(state);
-      hide("chip-generating");
-
       renderPlan(plan);
       try { localStorage.setItem("lastPlan", plan); } catch {}
     } catch (err) {
       renderError(err?.message || err);
+    } finally {
+      setButtonBusy(btn, false);
     }
   }
 
-  // ---- bind button (simple & explicit) ----
   document.addEventListener("DOMContentLoaded", () => {
-    // Prefer #run-btn; fallback to .primary (your gold button)
     const btn = byId("run-btn") || document.querySelector(".primary");
-    if (!btn) {
-      console.error("[main] Run Trade Agent button not found — add id='run-btn' to the button in index.html.");
-      return;
-    }
-    btn.addEventListener("click", run, { passive: true });
+    if (btn) btn.addEventListener("click", run, { passive: true });
 
+    // Optional: show last plan on load (or keep empty)
     const last = localStorage.getItem("lastPlan");
-    if (last && !output.textContent?.trim()) renderPlan(last);
-    if (!last) output.innerHTML = `<div class="bubble">Tap <strong>Run Trade Agent</strong> to generate today's plan.</div>`;
+    if (last) renderPlan(last);
+
+    // Hide any old helper banners if present
+    const helper = document.querySelector(".helper, .tip, .card, .status-wrap");
+    if (helper) helper.remove();
   });
 })();
