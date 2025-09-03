@@ -1,0 +1,109 @@
+{
+  "cash": {
+    "sleeve_value": 115000,
+    "cash_available": 58000,
+    "invested": 57000
+  },
+  "benchmarks": {
+    "AMZN": "QQQ",
+    "NVDA": "SOXX",
+    "MSFT": "QQQ",
+    "KTOS": "ITA",
+    "LRCX": "SOXX",
+    "PLTR": "QQQ",
+    "CRWV": "NA",
+    "BMNR": "IWM",
+    "AVAV": "ITA",
+    "AVGO": "SOXX",
+    "CRDO": "SOXX"
+  },
+  "positions": [
+    {
+      "ticker": "AMZN",
+      "qty": 75,
+      "avg": 212.22,
+      "notes": "Resistance 235\u2013240; add >240",
+      "sentiment": "Bullish"
+    },
+    {
+      "ticker": "KTOS",
+      "qty": 250,
+      "avg": 61.24,
+      "notes": "Add only on >72 breakout",
+      "sentiment": "Bullish"
+    },
+    {
+      "ticker": "NVDA",
+      "qty": 90,
+      "avg": 173.89,
+      "notes": "Hold; buy only >185 with sweeps",
+      "sentiment": "Bullish"
+    },
+    {
+      "ticker": "MSFT",
+      "qty": 20,
+      "avg": 517.87,
+      "notes": "Stay flat\u2014no confirmation",
+      "sentiment": "Neutral"
+    },
+    {
+      "ticker": "AVAV",
+      "qty": 25,
+      "avg": 240.63,
+      "notes": "Buy only >255 with flow",
+      "sentiment": "Bullish"
+    },
+    {
+      "ticker": "AVGO",
+      "qty": 20,
+      "avg": 295.66,
+      "notes": "Enter >320 with sweeps",
+      "sentiment": "Bullish"
+    },
+    {
+      "ticker": "CELH",
+      "qty": 50,
+      "avg": 61.08,
+      "notes": "",
+      "sentiment": ""
+    },
+    {
+      "ticker": "LRCX",
+      "qty": 15,
+      "avg": 99.59,
+      "notes": "Add only on >106 breakout",
+      "sentiment": "Bullish"
+    },
+    {
+      "ticker": "PENDING ACTIVITY",
+      "qty": null,
+      "avg": null,
+      "notes": "",
+      "sentiment": ""
+    }
+  ],
+  "watchlist": [
+    {
+      "ticker": "CRWV",
+      "notes": "Entry >102 with sweep",
+      "sentiment": "Neutral"
+    },
+    {
+      "ticker": "PLTR",
+      "notes": "Limit near 155; add >165",
+      "sentiment": "Bullish"
+    },
+    {
+      "ticker": "BMNR",
+      "notes": "Avoid until >52 breakout",
+      "sentiment": "Bearish"
+    }
+  ],
+  "research": [
+    {
+      "ticker": "CRDO",
+      "notes": "Buy near 120; add >128",
+      "sentiment": "Bullish"
+    }
+  ]
+}
