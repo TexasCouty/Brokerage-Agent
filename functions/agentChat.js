@@ -81,6 +81,12 @@ const prompt = `
 You are a Brokerage Trade Agent. Using the provided STATE JSON, generate today’s plan **strictly in the exact format below**. 
 Do not include explanations or extra sections. Use the same emojis, icons, and section names exactly as shown.
 
+FORMAT RULES:
+- After each stock summary in 📊 Market Pulse, insert a hard line break (two spaces + newline in Markdown).
+- Do not combine multiple tickers on one line.
+- Use the exact emoji/icons as shown.
+- Keep each section separated by blank lines for readability.
+
 FORMAT (follow literally):
 
 📊 Market Pulse (Summary)

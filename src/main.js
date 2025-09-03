@@ -78,6 +78,8 @@ function renderMarkdown(markdown) {
   bubbleHTML(html, "markdown");
 }
 
+
+
 // ---------- Main action ----------
 async function runTradeAgent() {
   setLoading(true);
@@ -88,12 +90,15 @@ async function runTradeAgent() {
     bubbleText("Generating plan…");
     const data = await callAgentWithState(state);
 
-    if (data?.ok && data?.plan) {
-      renderMarkdown(data.plan);
-    } else {
-      const details = data?.details ? `\n\n${String(data.details).slice(0, 400)}` : "";
-      bubbleText(`⚠️ ${data?.error || "Unknown error"}${details}`);
-    }
+if (data?.ok && data?.plan) {
+  // Force clean line breaks in the Market Pulse block, then render
+  const fixed = transformPlanForPulse(data.plan);
+  const html = window.marked.parse(fixed);
+  bubbleHTML(html, "markdown");
+} else {
+  const details = data?.details ? `\n\n${String(data.details).slice(0, 400)}` : "";
+  bubbleText(`⚠️ ${data?.error || "Unknown error"}${details}`);
+}
   } catch (e) {
     bubbleText(`⚠️ ${e.message || "Request failed"}`);
   } finally {
