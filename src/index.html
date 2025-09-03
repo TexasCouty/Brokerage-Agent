@@ -4,27 +4,39 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Brokerage Trade Agent</title>
-  <!-- <link rel="manifest" href="/manifest.webmanifest" /> -->
+
+  <!-- (PWA optional; leave commented until you're ready)
+  <link rel="manifest" href="/manifest.webmanifest" />
   <meta name="theme-color" content="#0b0b0b" />
+  -->
+
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header class="appbar">
     <div class="title">Brokerage Trade Agent</div>
-    <button id="installBtn" class="ghost" aria-label="Install">⤓</button>
+    <button id="installBtn" class="ghost" aria-label="Install" title="Install">⤓</button>
   </header>
 
   <main class="chat" id="chat">
-    <div class="msg assistant"><div class="bubble">
-      Tap <strong>Run Trade Agent</strong> to generate today’s plan in your exact format.
-    </div></div>
+    <div class="msg assistant">
+      <div class="bubble">
+        Tap <strong>Run Trade Agent</strong> to generate today’s plan in your exact format.
+      </div>
+    </div>
   </main>
 
   <div class="toolbar">
-    <button id="runBtn" class="primary">Run Trade Agent</button>
+    <button id="runBtn" class="primary">
+      <span class="btn-label">Run Trade Agent</span>
+      <span class="btn-spinner" hidden></span>
+    </button>
   </div>
 
+  <!-- Markdown renderer (tiny, zero build config) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <!-- App code -->
   <script type="module" src="/main.js"></script>
-  <!-- <script src="/sw.js"></script> -->
 </body>
 </html>

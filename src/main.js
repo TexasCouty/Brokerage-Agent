@@ -1,4 +1,4 @@
-// PWA SW (safe no-op if sw.js already registered)
+// --- Optional SW registration (safe if sw.js is absent)
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
@@ -6,8 +6,10 @@ if ("serviceWorker" in navigator) {
 const chat = document.getElementById("chat");
 const runBtn = document.getElementById("runBtn");
 const installBtn = document.getElementById("installBtn");
+const btnSpinner = runBtn?.querySelector(".btn-spinner");
+const btnLabel = runBtn?.querySelector(".btn-label");
 
-// Optional install prompt
+// Minimal install experience (optional)
 let deferredPrompt;
 window.addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault();
@@ -22,33 +24,39 @@ installBtn?.addEventListener("click", async () => {
   installBtn.style.display = "none";
 });
 
-// ----- UI helpers -----
-function escapeHtml(s) {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-function addMsg(role, text) {
+// ---------- UI helpers ----------
+function bubbleHTML(html, extraClass = "") {
   const div = document.createElement("div");
-  div.className = `msg ${role}`;
-  div.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+  div.className = `msg assistant`;
+  div.innerHTML = `<div class="bubble ${extraClass}">${html}</div>`;
   chat.appendChild(div);
-  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }));
 }
-function setLastAssistantText(text) {
-  const last = chat.querySelector(".msg.assistant:last-child .bubble");
-  if (last) last.textContent = text;
+function bubbleText(text) {
+  bubbleHTML(escapeBasic(text));
+}
+function setLoading(loading) {
+  if (!runBtn) return;
+  runBtn.disabled = loading;
+  if (btnSpinner) btnSpinner.hidden = !loading;
+  if (btnLabel) btnLabel.textContent = loading ? "Working…" : "Run Trade Agent";
+}
+// escape ampersand + < and " only, so '>' arrows render as desired
+function escapeBasic(s) {
+  return String(s).replace(/[&<"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", '"': "&quot;" }[c]));
 }
 
-// ----- API helpers -----
+// ---------- API calls ----------
 async function fetchState() {
   const r = await fetch("/.netlify/functions/tradeState");
   const text = await r.text();
+  console.debug("[tradeState]", r.status, text.slice(0, 160));
   let json;
-  try { json = JSON.parse(text); } catch (e) {
-    throw new Error(`tradeState returned non-JSON (${r.status}): ${text.slice(0,200)}`);
+  try { json = JSON.parse(text); } catch {
+    throw new Error(`tradeState non-JSON (${r.status})`);
   }
-  console.debug("[tradeState]", r.status, json);
   if (!r.ok || !json?.ok) throw new Error(json?.error || `tradeState HTTP ${r.status}`);
-  return json.state || {};
+  return json.state;
 }
 
 async function callAgentWithState(state) {
@@ -58,36 +66,38 @@ async function callAgentWithState(state) {
     body: JSON.stringify({ state })
   });
   const text = await r.text();
-  console.debug("[agentChat raw]", r.status, text.slice(0,200));
-  let json;
-  try { json = JSON.parse(text); } catch (e) {
-    return { ok: false, error: "Non-JSON reply from agentChat", details: text };
-  }
-  return json;
+  console.debug("[agentChat raw]", r.status, text.slice(0, 160));
+  try { return JSON.parse(text); }
+  catch { return { ok:false, error:"Non-JSON reply", details: text }; }
 }
 
-// ----- Main action -----
+// ---------- Markdown rendering ----------
+function renderMarkdown(markdown) {
+  // marked already escapes HTML appropriately
+  const html = window.marked.parse(markdown);
+  bubbleHTML(html, "markdown");
+}
+
+// ---------- Main action ----------
 async function runTradeAgent() {
-  addMsg("assistant", "Loading state…");
+  setLoading(true);
+  bubbleText("Loading state…");
   try {
     const state = await fetchState();
-    setLastAssistantText("Generating plan…");
 
+    bubbleText("Generating plan…");
     const data = await callAgentWithState(state);
 
     if (data?.ok && data?.plan) {
-      const safe = data.plan.replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
-      setLastAssistantText(""); // clear the "Generating..." bubble
-      addMsg("assistant", safe.includes("\n") ? safe : `\n${safe}`);
+      renderMarkdown(data.plan);
     } else {
-      const msg = `⚠️ ${data?.error || "Unknown error"}`
-        + (data?.details ? `\n\n${String(data.details).slice(0,400)}` : "");
-      setLastAssistantText(""); 
-      addMsg("assistant", msg);
+      const details = data?.details ? `\n\n${String(data.details).slice(0, 400)}` : "";
+      bubbleText(`⚠️ ${data?.error || "Unknown error"}${details}`);
     }
-  } catch (err) {
-    setLastAssistantText(""); 
-    addMsg("assistant", `⚠️ ${err?.message || "Error contacting Agent"}`);
+  } catch (e) {
+    bubbleText(`⚠️ ${e.message || "Request failed"}`);
+  } finally {
+    setLoading(false);
   }
 }
 
