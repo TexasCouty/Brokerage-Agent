@@ -20,5 +20,6 @@
   "homepage": "https://github.com/TexasCouty/Brokerage-Agent#readme",
   "dependencies": {
     "mongodb": "^6.19.0"
+    "@netlify/blobs": "^6.0.0"
   }
 }
