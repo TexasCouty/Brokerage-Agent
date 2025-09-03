@@ -143,19 +143,67 @@ async function openAIJSON({ system, user, log }) {
 
     if (!resp.ok) return { ok: false, error: `OpenAI error ${resp.status}`, text };
 
-    // With response_format=json_object, assistant message content is JSON
-    const outer = JSON.parse(text);
-    const content = outer?.choices?.[0]?.message?.content;
-    let obj = content;
+    // Outer OpenAI envelope
+    let outer;
+    try { outer = JSON.parse(text); } catch {
+      return { ok: false, error: "Upstream envelope not JSON", text: text.slice(0, 400) };
+    }
+
+    let content = outer?.choices?.[0]?.message?.content;
+
+    // Fast path: already an object
+    if (content && typeof content === "object") {
+      if (content.version == null) content.version = 1;
+      return { ok: true, data: content };
+    }
+
+    // Common path: string that should be JSON
     if (typeof content === "string") {
-      try { obj = JSON.parse(content); } catch { /* keep string */ }
+      // 1) direct parse
+      try {
+        const obj = JSON.parse(content);
+        if (obj && typeof obj === "object") {
+          if (obj.version == null) obj.version = 1;
+          return { ok: true, data: obj };
+        }
+      } catch (_) {}
+
+      // 2) fenced ```json ... ```
+      const fence = content.match(/```json\s*([\s\S]*?)```/i) || content.match(/```\s*([\s\S]*?)```/);
+      if (fence) {
+        try {
+          const obj = JSON.parse(fence[1]);
+          if (obj && typeof obj === "object") {
+            if (obj.version == null) obj.version = 1;
+            return { ok: true, data: obj };
+          }
+        } catch (_) {}
+      }
+
+      // 3) first { ... } blob (loose)
+      const firstBrace = content.indexOf("{");
+      if (firstBrace !== -1) {
+        // naive scan to the last closing brace
+        const lastBrace = content.lastIndexOf("}");
+        if (lastBrace > firstBrace) {
+          const maybe = content.slice(firstBrace, lastBrace + 1);
+          try {
+            const obj = JSON.parse(maybe);
+            if (obj && typeof obj === "object") {
+              if (obj.version == null) obj.version = 1;
+              return { ok: true, data: obj };
+            }
+          } catch (_) {}
+        }
+      }
+
+      // Couldn’t coerce — return error with preview so UI can show it
+      return { ok: false, error: "Assistant content was not JSON object", text: content.slice(0, 400) };
     }
-    if (typeof obj !== "object" || obj === null) {
-      return { ok: false, error: "Assistant content was not JSON object" };
-    }
-    // Stamp version if missing
-    if (typeof obj.version !== "number") obj.version = 1;
-    return { ok: true, data: obj };
+
+    // Unexpected shape
+    return { ok: false, error: "Assistant content missing or invalid", text: String(content).slice(0, 400) };
+
   } catch (e) {
     return { ok: false, error: e.name === "AbortError" ? "OpenAI request timed out" : e.message };
   }
