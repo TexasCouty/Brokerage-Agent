@@ -1,91 +1,86 @@
 // functions/agentChat.js
 // Netlify Function (v1). Pro plan friendly (25s). Strict JSON { plan }.
-// Sections: Market Pulse, Cash Deployment Tracker, and Portfolio Snapshot — Owned Positions ONLY.
-// Includes post-validate + one-shot corrective rewrite if the model deviates.
+// ONLY three sections: Market Pulse, Cash Deployment Tracker, 1) Portfolio Snapshot — Owned Positions.
+// Ultra-strict system prompt, deterministic settings, JSON-only response_format,
+// server-side validation, and one corrective rewrite if the first reply drifts.
 
 const crypto = require("crypto");
 
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const MODEL = "gpt-4o-mini";
-const REQ_TIMEOUT_MS = 25000; // ~25s (under Netlify Pro 26s cap)
-const RETRIES = 1;
+const REQ_TIMEOUT_MS = 25000; // ~25s (Netlify Pro cap ~26s)
 const MAX_REWRITES = 1;
 
 exports.handler = async (event) => {
   const rid = (crypto.randomUUID?.() || Math.random().toString(36).slice(2));
-  const t0 = Date.now();
-  const T = () => Date.now() - t0;
+  const start = Date.now();
+  const T = () => Date.now() - start;
   const log = (stage, extra = {}) =>
     console.log(JSON.stringify({ fn: "agentChat", rid, t: T(), stage, ...extra }));
 
   try {
     if (event.httpMethod !== "POST") {
-      return j(405, { ok: false, error: "Method Not Allowed. Use POST." }, rid);
+      return json(405, { ok: false, error: "Method Not Allowed. Use POST." }, rid);
     }
 
     let payload = {};
     try { payload = JSON.parse(event.body || "{}"); }
-    catch (e) { log("json-parse-error", { message: e.message }); return j(400, { ok:false, error:"Invalid JSON body" }, rid); }
+    catch (e) { log("bad-json", { msg: e.message }); return json(400, { ok:false, error:"Invalid JSON body" }, rid); }
 
-    if (payload.ping === "test") { log("probe-ok"); return j(200, { ok:true, echo: payload }, rid); }
+    if (payload.ping === "test") return json(200, { ok:true, echo: payload }, rid);
 
     const state = payload.state;
-    if (!state || typeof state !== "object") {
-      log("no-state");
-      return j(400, { ok:false, error:"Missing 'state' in request body" }, rid);
-    }
-    if (!process.env.OPENAI_API_KEY) {
-      log("no-openai");
-      return j(500, { ok:false, error:"Server not configured (missing OPENAI_API_KEY)" }, rid);
-    }
+    if (!state || typeof state !== "object") return json(400, { ok:false, error:"Missing 'state' in request body" }, rid);
+    if (!process.env.OPENAI_API_KEY) return json(500, { ok:false, error:"Missing OPENAI_API_KEY" }, rid);
 
-    const prompt = buildUserPromptOwnedOnly(state);
-    log("prompt-built", { promptLen: prompt.length });
+    const sanitized = sanitizeState(state);
+    const userPrompt = buildUserPromptOwnedOnly(sanitized);
 
-    // ---- First attempt
-    const first = await callOpenAIJSON({ prompt, timeoutMs: REQ_TIMEOUT_MS, rid, log });
+    // ---------- First attempt
+    const first = await callOpenAIJSON({ prompt: userPrompt, rid, log });
     if (first.ok) {
       const plan = extractPlan(first.data);
-      if (plan && isPlanValid(plan)) {
-        log("done", { attempt: 0, planLen: plan.length });
-        return j(200, { ok: true, plan, meta: { rid, usage: first.data?.usage } }, rid);
+      const critique = validatePlan(plan, sanitized);
+      if (critique.ok) {
+        log("ok-first", { planLen: plan.length });
+        return json(200, { ok: true, plan, meta: { rid, usage: first.data?.usage } }, rid);
       }
-    }
-
-    // ---- Corrective rewrite (at most once)
-    for (let rewrite = 1; rewrite <= MAX_REWRITES; rewrite++) {
-      const prevPlan = first.ok ? extractPlan(first.data) : "";
-      const critique = validateCritique(prevPlan);
-      const fixPrompt = buildFixPromptOwnedOnly(state, critique, prevPlan);
-      const second = await callOpenAIJSON({ prompt: fixPrompt, timeoutMs: REQ_TIMEOUT_MS, rid, log });
-
-      if (second.ok) {
-        const fixed = extractPlan(second.data);
-        if (fixed && isPlanValid(fixed)) {
-          log("done", { attempt: rewrite, planLen: fixed.length });
-          return j(200, { ok: true, plan: fixed, meta: { rid, usage: second.data?.usage, rewrite } }, rid);
+      log("needs-fix", { reasons: critique.reasons });
+      // ---------- Corrective rewrite (once)
+      for (let i = 0; i < MAX_REWRITES; i++) {
+        const fixPrompt = buildFixPrompt(sanitized, critique, plan);
+        const second = await callOpenAIJSON({ prompt: fixPrompt, rid, log });
+        if (second.ok) {
+          const fixed = extractPlan(second.data);
+          const reCrit = validatePlan(fixed, sanitized);
+          if (reCrit.ok) {
+            log("ok-rewrite", { planLen: fixed.length });
+            return json(200, { ok: true, plan: fixed, meta: { rid, usage: second.data?.usage, rewrite: true } }, rid);
+          } else {
+            log("rewrite-still-bad", { reasons: reCrit.reasons });
+          }
         }
       }
+      return json(502, { ok:false, error:"Validation failed after rewrite", meta:{ rid, reasons: critique.reasons } }, rid);
     }
 
-    // If we got here, either OpenAI was slow or validation failed.
-    const errMsg = first.error || "Validation failed";
-    log("returning-error", { message: errMsg });
-    return j(502, { ok: false, error: errMsg, meta: { rid } }, rid);
+    // If we get here, upstream error or timeout
+    log("openai-error", { error: first.error });
+    return json(502, { ok:false, error:first.error || "Upstream error", meta:{ rid } }, rid);
 
   } catch (err) {
-    console.error("[agentChat] unhandled", err);
-    return j(500, { ok:false, error:"Server error", meta:{ rid } }, rid);
+    console.error("[agentChat] fatal", err);
+    return json(500, { ok:false, error:"Server error", meta:{ rid } }, rid);
   }
 };
 
-/* ---------------------------- helpers ---------------------------- */
+/* -------------------------- helpers -------------------------- */
 
-function j(statusCode, body, rid) {
+function json(statusCode, body, rid) {
   return { statusCode, headers: { "content-type": "application/json", "x-rid": rid }, body: JSON.stringify(body) };
 }
 
-function sanitizeStateForPrompt(state) {
+function sanitizeState(state) {
   return {
     cash: state.cash ?? null,
     benchmarks: state.benchmarks ?? null,
@@ -93,99 +88,100 @@ function sanitizeStateForPrompt(state) {
   };
 }
 
-/** Build the primary prompt — OWNED POSITIONS ONLY. */
+function buildSystemMessage() {
+  // Loud & explicit rules to reduce drift.
+  return `YOU ARE A BROKERAGE TRADE AGENT.
+
+FOLLOW THESE RULES EXACTLY:
+1) Return ONLY a single JSON object with EXACTLY one key: {"plan":"<string>"}.
+2) NO code fences, NO extra keys, NO preface or epilogue, NO markdown blocks outside the JSON.
+3) The plan string must contain EXACTLY these three sections, in this order, with these exact headings:
+   • 📊 Market Pulse (Summary)
+   • 💵 Cash Deployment Tracker
+   • 1) Portfolio Snapshot — Owned Positions
+4) DO NOT include watchlist or research sections or any other sections.
+5) ONLY reference tickers that appear in STATE.positions.
+6) In Market Pulse: one line per owned ticker; AFTER EACH TICKER LINE INSERT TWO SPACES THEN A NEWLINE (hard Markdown line break).
+7) Use concise, readable Markdown (bullets, short lines). Use percentages like "(38%)"; DO NOT use "~".
+8) Separate sections with a single blank line.
+9) Output must be deterministic and compact.`;
+}
+
 function buildUserPromptOwnedOnly(state) {
   return `
-Return ONLY a JSON object: {"plan":"<string>"}.
-The "plan" string MUST contain exactly these sections and nothing else:
+STATE (owned positions only):
+${JSON.stringify(state)}
 
+CONSTRUCT {"plan":"..."} where "plan" contains the three required sections only.
+
+FORMAT GUIDANCE (copy headings & spacing exactly):
 📊 Market Pulse (Summary)
 
 (Performance vs. relevant index — 🟢 outperform · 🟡 in line · 🔴 lagging)
 
-Write ONE line per OWNED ticker from STATE.positions.
-After each ticker line, insert a hard Markdown line break (two spaces then newline).  
+Write ONE line per OWNED ticker; after EACH line add two spaces then newline.
 Example (structure only):
 AMZN (QQQ) 🟡 — in line with QQQ, modest gain.  
-NVDA (SOXX) 🟢 — outperforming SOXX, stable above $X.  
+NVDA (SOXX) 🟢 — outperforming SOXX, holding above $X.  
 
 Summary: 🟢 X outperforming · 🟡 Y in line · 🔴 Z lagging
 
 💵 Cash Deployment Tracker
 
-Brokerage sleeve total value: ≈ <from STATE.cash.sleeve_value if present, else estimate>
+Brokerage sleeve total value: ≈ <STATE.cash.sleeve_value or estimate>
 Cash available: <STATE.cash.cash_available> (<percent of sleeve_value>)
-Invested (stocks): <STATE.cash.invested or sleeve_value - cash_available> (<percent>)
-Active triggers today (strict): <None or short list derived ONLY from owned tickers>
-Playbook: 1–2 short sentences, concise.
+Invested (stocks): <STATE.cash.invested or (sleeve_value - cash_available)> (<percent>)
+Active triggers today (strict): <None or short list based ONLY on owned tickers>
+Playbook: 1–2 sentences, concise, actionable.
 
 1) Portfolio Snapshot — Owned Positions
 
-For EACH OWNED ticker in STATE.positions, include exactly this bullet block:
+For EACH OWNED ticker include this bullet block:
 TICKER — 🟢/🟡/🔴 $<price or “n/a”> | Sentiment: <Bullish/Neutral/Bearish> [⏸️ HOLD or ✅ BUY or ⚠️ TRIM]
 • Position: <qty> @ <avg> | P/L <calc or “n/a”>
 • Flow: <one short line; if unknown, Neutral>
 • Resistance: <range or “n/a”>
 • Breakout watch: ><level> → <targets> (if applicable)
 • Idea: One short actionable line.
-
-HARD CONSTRAINTS:
-- Do NOT include watchlist or research sections or any other sections.
-- Do NOT mention tickers not in STATE.positions.
-- Use percentages like "(38%)" — do NOT use "~".
-- Keep sections separated by a single blank line.
-- Output ONLY the JSON object {"plan":"..."} with NO code fences.
-
-STATE:
-${JSON.stringify(sanitizeStateForPrompt(state))}
 `.trim();
 }
 
-/** Build corrective prompt when the first output drifted. */
-function buildFixPromptOwnedOnly(state, critique, previousPlan) {
+function buildFixPrompt(state, critique, previousPlan) {
   return `
-Previous attempt did not follow the required format.
+Your previous output violated these rules:
+${critique.reasons.join("\n")}
 
-Critique:
-${critique}
-
-Rewrite the plan to FIX all issues.
-Return ONLY a JSON object: {"plan":"<string>"}.
-Follow the same constraints as before (owned positions only, exact three sections, no extras).
+Rewrite the plan to FULLY satisfy all rules.
+Return ONLY a single JSON object: {"plan":"<fixed string>"} with the three sections EXACTLY as required.
+Do not include any other keys or text.
 
 STATE:
-${JSON.stringify(sanitizeStateForPrompt(state))}
+${JSON.stringify(state)}
 
 Previous plan (for reference only):
 ${JSON.stringify(previousPlan || "")}
 `.trim();
 }
 
-/** Call OpenAI with JSON response_format and a timeout. */
-async function callOpenAIJSON({ prompt, timeoutMs, rid, log }) {
+async function callOpenAIJSON({ prompt, rid, log }) {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), REQ_TIMEOUT_MS);
 
     const upstream = await fetch(OPENAI_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
         model: MODEL,
         messages: [
-          {
-            role: "system",
-            content:
-`You are a Brokerage Trade Agent.
-You MUST output a single JSON object with EXACTLY one key: "plan".
-Do not include code fences or extra keys. The "plan" must match the required three sections.`,
-          },
+          { role: "system", content: buildSystemMessage() },
           { role: "user", content: prompt },
         ],
-        temperature: 0.2,
+        temperature: 0,
+        top_p: 0.1,
         response_format: { type: "json_object" },
         max_tokens: 1200,
       }),
@@ -196,11 +192,8 @@ Do not include code fences or extra keys. The "plan" must match the required thr
     const text = await upstream.text();
     log("openai-response", { status: upstream.status, bodyLen: text.length });
 
-    if (!upstream.ok) {
-      return { ok: false, error: `OpenAI error ${upstream.status}`, text };
-    }
+    if (!upstream.ok) return { ok: false, error: `OpenAI error ${upstream.status}`, text };
 
-    // With response_format=json_object, the assistant message content is JSON text.
     const data = JSON.parse(text);
     return { ok: true, data };
   } catch (e) {
@@ -208,11 +201,11 @@ Do not include code fences or extra keys. The "plan" must match the required thr
   }
 }
 
-/** Extract {"plan": "..."} from the OpenAI JSON response. */
 function extractPlan(openaiJSON) {
   try {
     const content = openaiJSON?.choices?.[0]?.message?.content;
     if (!content) return null;
+    // With response_format=json_object, content is either JSON string or object {"plan": "..."}
     if (typeof content === "string") {
       const obj = JSON.parse(content);
       return typeof obj?.plan === "string" ? obj.plan : null;
@@ -226,10 +219,15 @@ function extractPlan(openaiJSON) {
   }
 }
 
-/** Validate that the plan has ONLY the required sections and no forbidden ones. */
-function isPlanValid(plan) {
-  if (typeof plan !== "string") return false;
-  const mustHave = [
+// ---- Validation that enforces: 3 sections only; no extras; proper line breaks in Market Pulse
+function validatePlan(plan, state) {
+  const reasons = [];
+  if (typeof plan !== "string" || !plan.trim()) {
+    reasons.push("- Plan string missing/empty.");
+    return { ok: false, reasons };
+  }
+
+  const must = [
     "📊 Market Pulse (Summary)",
     "💵 Cash Deployment Tracker",
     "1) Portfolio Snapshot — Owned Positions",
@@ -240,20 +238,27 @@ function isPlanValid(plan) {
     "TODAY’S PLAN",
     "TODAY'S PLAN",
   ];
-  const hasAll = mustHave.every(s => plan.includes(s));
-  const hasForbidden = forbidden.some(s => plan.includes(s));
-  return hasAll && !hasForbidden;
-}
 
-/** Produce a human-readable critique for the corrective prompt. */
-function validateCritique(plan) {
-  if (!plan) return "- No plan returned.\n";
-  const lines = [];
-  if (!plan.includes("📊 Market Pulse (Summary)")) lines.push("- Missing '📊 Market Pulse (Summary)'.");
-  if (!plan.includes("💵 Cash Deployment Tracker")) lines.push("- Missing '💵 Cash Deployment Tracker'.");
-  if (!plan.includes("1) Portfolio Snapshot — Owned Positions")) lines.push("- Missing '1) Portfolio Snapshot — Owned Positions'.");
-  if (/\b2\)\s*Entry Radar\b/.test(plan)) lines.push("- Contains forbidden '2) Entry Radar' section.");
-  if (/\b3\)\s*Research\b/.test(plan)) lines.push("- Contains forbidden '3) Research' section.");
-  if (/TODAY[’']S PLAN/i.test(plan)) lines.push("- Contains forbidden 'TODAY’S PLAN' header.");
-  return lines.length ? lines.join("\n") : "- Structure present but not exact (ensure headings/emojis/blank lines).";
+  // Has required headers?
+  must.forEach(h => { if (!plan.includes(h)) reasons.push(`- Missing required section header: "${h}".`); });
+
+  // No forbidden content?
+  forbidden.forEach(f => { if (plan.includes(f)) reasons.push(`- Forbidden content present: "${f}".`); });
+
+  // Market Pulse hard line breaks: require at least one owned ticker line with "two spaces + newline"
+  const ownedTickers = (state.positions || []).map(p => String(p.ticker || "").trim()).filter(Boolean);
+  if (ownedTickers.length) {
+    const pulseStart = plan.indexOf("📊 Market Pulse (Summary)");
+    const cashStart = plan.indexOf("💵 Cash Deployment Tracker");
+    if (pulseStart >= 0 && cashStart > pulseStart) {
+      const pulseBody = plan.slice(pulseStart, cashStart);
+      const hasHardBreak = /  \n/.test(pulseBody);
+      if (!hasHardBreak) reasons.push("- Market Pulse lines must end with TWO SPACES then a newline for hard Markdown line breaks.");
+      // also require at least one owned ticker symbol to appear in pulse
+      const anyTickerInPulse = ownedTickers.some(t => pulseBody.toUpperCase().includes(t.toUpperCase()));
+      if (!anyTickerInPulse) reasons.push("- Market Pulse must include lines for OWNED tickers.");
+    }
+  }
+
+  return { ok: reasons.length === 0, reasons };
 }
