@@ -73,12 +73,25 @@ async function callAgentWithState(state) {
 
 // ---------- Markdown rendering ----------
 function renderMarkdown(markdown) {
-  // marked already escapes HTML appropriately
   const html = window.marked.parse(markdown);
   bubbleHTML(html, "markdown");
 }
 
+// ---------- Market Pulse post-processor ----------
+// Ensures each ticker in the Market Pulse block is on its own line even if the model
+// returned a single paragraph. Also nudges "Summary:" to a new paragraph.
+function transformPlanForPulse(markdown) {
+  let s = String(markdown);
 
+  // Put a hard Markdown line break after a period that’s followed by a ticker like "AMZN ("
+  // Example: "... modest gain. KTOS (" -> "... modest gain.  \nKTOS ("
+  s = s.replace(/\.([ \t]+)([A-Z]{2,6}\s*\()/g, ".  \n$2");
+
+  // Make sure "Summary:" starts on a fresh paragraph.
+  s = s.replace(/\s+Summary:/, "\n\nSummary:");
+
+  return s;
+}
 
 // ---------- Main action ----------
 async function runTradeAgent() {
@@ -90,15 +103,14 @@ async function runTradeAgent() {
     bubbleText("Generating plan…");
     const data = await callAgentWithState(state);
 
-if (data?.ok && data?.plan) {
-  // Force clean line breaks in the Market Pulse block, then render
-  const fixed = transformPlanForPulse(data.plan);
-  const html = window.marked.parse(fixed);
-  bubbleHTML(html, "markdown");
-} else {
-  const details = data?.details ? `\n\n${String(data.details).slice(0, 400)}` : "";
-  bubbleText(`⚠️ ${data?.error || "Unknown error"}${details}`);
-}
+    if (data?.ok && data?.plan) {
+      const fixed = transformPlanForPulse(data.plan);
+      const html = window.marked.parse(fixed);
+      bubbleHTML(html, "markdown");
+    } else {
+      const details = data?.details ? `\n\n${String(data.details).slice(0, 400)}` : "";
+      bubbleText(`⚠️ ${data?.error || "Unknown error"}${details}`);
+    }
   } catch (e) {
     bubbleText(`⚠️ ${e.message || "Request failed"}`);
   } finally {
