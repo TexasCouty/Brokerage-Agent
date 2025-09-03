@@ -1,4 +1,4 @@
-// --- Optional SW registration (safe if sw.js is absent)
+// Optional SW registration (safe if sw.js is absent)
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
@@ -71,26 +71,24 @@ async function callAgentWithState(state) {
   catch { return { ok:false, error:"Non-JSON reply", details: text }; }
 }
 
+// ---------- Market Pulse post-processor ----------
+function transformPlanForPulse(markdown) {
+  let s = String(markdown);
+
+  // Put a hard Markdown line break after a period followed by a ticker like "AMZN ("
+  // Example: "... modest gain. KTOS (" -> "... modest gain.  \nKTOS ("
+  s = s.replace(/\.([ \t]+)([A-Z]{2,6}\s*\()/g, ".  \n$2");
+
+  // Ensure "Summary:" begins on a new paragraph
+  s = s.replace(/\s+Summary:/, "\n\nSummary:");
+
+  return s;
+}
+
 // ---------- Markdown rendering ----------
 function renderMarkdown(markdown) {
   const html = window.marked.parse(markdown);
   bubbleHTML(html, "markdown");
-}
-
-// ---------- Market Pulse post-processor ----------
-// Ensures each ticker in the Market Pulse block is on its own line even if the model
-// returned a single paragraph. Also nudges "Summary:" to a new paragraph.
-function transformPlanForPulse(markdown) {
-  let s = String(markdown);
-
-  // Put a hard Markdown line break after a period that’s followed by a ticker like "AMZN ("
-  // Example: "... modest gain. KTOS (" -> "... modest gain.  \nKTOS ("
-  s = s.replace(/\.([ \t]+)([A-Z]{2,6}\s*\()/g, ".  \n$2");
-
-  // Make sure "Summary:" starts on a fresh paragraph.
-  s = s.replace(/\s+Summary:/, "\n\nSummary:");
-
-  return s;
 }
 
 // ---------- Main action ----------
@@ -104,7 +102,11 @@ async function runTradeAgent() {
     const data = await callAgentWithState(state);
 
     if (data?.ok && data?.plan) {
-      const fixed = transformPlanForPulse(data.plan);
+      // 1) Force clean line breaks in Market Pulse block
+      let fixed = transformPlanForPulse(data.plan);
+      // 2) Escape ~ so "(~38%)" doesn't render as strikethrough
+      fixed = fixed.replace(/~/g, "\\~");
+      // 3) Render
       const html = window.marked.parse(fixed);
       bubbleHTML(html, "markdown");
     } else {
