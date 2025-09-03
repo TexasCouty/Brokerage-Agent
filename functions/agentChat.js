@@ -1,12 +1,12 @@
 // functions/agentChat.js
-// Netlify Function (v1 runtime). Always returns JSON; enforces { plan: "<string>" }.
-// Adds timeout + single retry; structured console logs with rid.
+// Netlify Function (v1). Pro plan friendly: 25s timeout, single retry, strict JSON { plan }.
+// Sections: Market Pulse, Cash Deployment Tracker, and Portfolio Snapshot — Owned Positions ONLY.
 
 const crypto = require("crypto");
 
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const MODEL = "gpt-4o-mini";
-const REQ_TIMEOUT_MS = 25000; // abort before Netlify hard limit
+const REQ_TIMEOUT_MS = 25000; // ~25s (under Netlify Pro 26s cap)
 const RETRIES = 1;
 
 exports.handler = async (event) => {
@@ -28,7 +28,6 @@ exports.handler = async (event) => {
       return j(400, { ok:false, error:"Invalid JSON body" }, rid);
     }
 
-    // Lightweight probe
     if (payload.ping === "test") {
       log("probe-ok");
       return j(200, { ok:true, echo: payload }, rid);
@@ -45,7 +44,7 @@ exports.handler = async (event) => {
       return j(500, { ok:false, error:"Server not configured (missing OPENAI_API_KEY)" }, rid);
     }
 
-    const prompt = buildUserPrompt(state);
+    const prompt = buildUserPromptOwnedOnly(state);
     log("prompt-built", { promptLen: prompt.length });
 
     let lastErr, respBody = "", usage;
@@ -71,12 +70,16 @@ exports.handler = async (event) => {
 CRITICAL RULES:
 - ALWAYS output a single JSON object with this exact shape: { "plan": "<string>" }.
 - The "plan" string must follow the provided TEMPLATE exactly (same section names, emojis, and blank lines).
+- Only include information for OWNED POSITIONS (STATE.positions). Do NOT include watchlist or research tickers anywhere.
 - Do NOT include Markdown code fences or any text outside the JSON object.
 - No extra keys; only { "plan": "..." }.`,
               },
               { role: "user", content: prompt },
             ],
             temperature: 0.2,
+            // Encourage valid JSON from the model:
+            response_format: { type: "json_object" },
+            max_tokens: 1200
           }),
           signal: controller.signal,
         });
@@ -91,14 +94,14 @@ CRITICAL RULES:
           // Parse upstream JSON strictly
           try {
             const data = JSON.parse(respBody);
-            const plan = data?.choices?.[0]?.message?.content || "";
             usage = data?.usage;
 
-            // The model should already have produced a JSON string in message.content
-            // Parse that again to extract { plan: "..." }
-            let packed;
-            try { packed = JSON.parse(plan); } catch (e) {
-              throw new Error("Assistant message was not strict JSON {\"plan\": \"...\"}");
+            // With response_format=json_object, assistant content is a JSON string or object.
+            // Extract { plan: "<...>" } from message content.
+            const content = data?.choices?.[0]?.message?.content;
+            let packed = content;
+            if (typeof content === "string") {
+              try { packed = JSON.parse(content); } catch { /* keep string */ }
             }
             if (!packed || typeof packed.plan !== "string" || !packed.plan.trim()) {
               throw new Error("Missing or empty 'plan' field in assistant JSON");
@@ -111,13 +114,11 @@ CRITICAL RULES:
           }
         }
       } catch (e) {
-        // AbortError or network failure
         lastErr = e.name === "AbortError" ? new Error("OpenAI request timed out") : e;
         log("openai-call-error", { message: lastErr.message, attempt });
       }
     }
 
-    // All attempts failed
     log("returning-error", { message: lastErr?.message, preview: respBody?.slice?.(0, 200) || "" });
     return j(502, {
       ok: false,
@@ -139,8 +140,8 @@ function j(statusCode, body, rid) {
   };
 }
 
-function buildUserPrompt(state) {
-  // The model must copy this structure into plan (as plain text), but return it wrapped as {"plan": "..."}.
+// === Prompt builder: OWNED POSITIONS ONLY ======================================
+function buildUserPromptOwnedOnly(state) {
   return `
 TEMPLATE (copy this exact structure and emojis into the "plan" string):
 
@@ -148,7 +149,7 @@ TEMPLATE (copy this exact structure and emojis into the "plan" string):
 
 (Performance vs. relevant index — 🟢 outperform · 🟡 in line · 🔴 lagging)
 
-<One line per ticker; after each line use a hard Markdown line break: two spaces + newline>  
+<One line per OWNED TICKER from STATE.positions; after each line use a hard Markdown line break: two spaces + newline>  
 Ex:
 AMZN (Nasdaq) 🟡 — in line with Nasdaq, modest gain.  
 NVDA (Nasdaq) 🟢 — outperforming Nasdaq, steady above $180.  
@@ -158,40 +159,35 @@ Summary: 🟢 X outperforming · 🟡 Y in line · 🔴 Z lagging
 
 💵 Cash Deployment Tracker
 
-Brokerage sleeve total value: ≈ $115,000
-Cash available: $43,647.89 (38%)
-Invested (stocks): ≈ $71,350 (62%)
-Active triggers today (strict): <None or short list>
-Playbook: Brief guidance on how to deploy/hold.
+Brokerage sleeve total value: ≈ <from STATE.cash.sleeve_value if present, else estimate>
+Cash available: <from STATE.cash.cash_available> (<percent of sleeve_value if available>)
+Invested (stocks): <from STATE.cash.invested if present, else sleeve_value - cash_available> (<percent>)
+Active triggers today (strict): <None or a short bullet list based ONLY on owned tickers>
+Playbook: Brief guidance; keep to one or two sentences.
 
 1) Portfolio Snapshot — Owned Positions
 
-<One block per STATE.positions ticker; keep exactly this bullet format>
-AMZN — 🟡 $231.7 | Sentiment: Bullish 🐂 [⏸️ HOLD]
-• Position: 75 @ 212.22 | P/L +9.2%
-• Flow: Balanced; no sweeps today.
-• Resistance: 235–240
-• Breakout watch: >240 → 245–250
-• Idea: Hold—enter only on confirmed breakout.
+<One block per OWNED ticker from STATE.positions; keep exactly this bullet format>
+TICKER — 🟢/🟡/🔴 $<price or “n/a”> | Sentiment: <Bullish/Neutral/Bearish> [⏸️ HOLD or ✅ BUY or ⚠️ TRIM]
+• Position: <qty> @ <avg> | P/L <calc if possible or “n/a”>
+• Flow: <one short line based on sentiment/assumptions; if unknown, keep neutral>
+• Resistance: <range or “n/a”>
+• Breakout watch: ><level> → <targets> (if applicable)
+• Idea: Short one-liner, ONLY for the owned ticker.
 
-…repeat for each owned ticker…
-
-2) Entry Radar — Watchlist (No positions yet)
-
-…one block per STATE.watchlist ticker, similar style…
-
-3) Research — Bullish Sector Picks
-
-…one block per STATE.research ticker, similar style…
-
-RULES:
-- Stick to the tickers/benchmarks provided in STATE.
+IMPORTANT CONSTRAINTS:
+- DO NOT include watchlist or research sections at all.
+- DO NOT mention tickers that are not in STATE.positions in any section.
+- For Market Pulse, only write lines for OWNED tickers and benchmarks inferred from STATE.benchmarks for those tickers.
 - Use percentages like "(38%)" — do NOT use "~".
-- For Market Pulse, ALWAYS put a hard line break after each ticker line ("two spaces + newline").
-- Separate sections by a single blank line.
+- Keep sections separated by a single blank line.
 - Output only one top-level JSON object: { "plan": "<the full formatted plan>" }.
 
 STATE JSON:
-${JSON.stringify(state)}
+${JSON.stringify({
+    cash: state.cash ?? null,
+    benchmarks: state.benchmarks ?? null,
+    positions: state.positions ?? [],
+  })}
   `.trim();
 }
