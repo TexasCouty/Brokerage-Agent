@@ -6,7 +6,7 @@ const crypto = require("crypto");
 
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const MODEL = "gpt-4o-mini";
-const REQ_TIMEOUT_MS = 9000; // abort before Netlify hard limit
+const REQ_TIMEOUT_MS = 25000; // abort before Netlify hard limit
 const RETRIES = 1;
 
 exports.handler = async (event) => {
