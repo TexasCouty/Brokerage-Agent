@@ -39,10 +39,12 @@
     }
   }
 
-  function renderPlan(text) {
-    ensureOutput().innerHTML = `<pre class="bubble markdown">${sanitize(String(text || ""))}</pre>`;
-  }
-
+function renderPlan(text) {
+  // Escape HTML, then convert \n to <br> so line breaks survive CSS
+  const safe = sanitize(String(text || ""))
+    .replace(/\n/g, "<br>");
+  ensureOutput().innerHTML = `<div class="bubble markdown">${safe}</div>`;
+}
   function renderError(message) {
     ensureOutput().innerHTML =
       `<div class="bubble"><div style="font-weight:700;margin-bottom:6px">Something went wrong</div>
