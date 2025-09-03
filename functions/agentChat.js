@@ -1,6 +1,7 @@
 // functions/agentChat.js
-// Netlify Function (v1). Pro plan friendly: 25s timeout, single retry, strict JSON { plan }.
+// Netlify Function (v1). Pro plan friendly (25s). Strict JSON { plan }.
 // Sections: Market Pulse, Cash Deployment Tracker, and Portfolio Snapshot — Owned Positions ONLY.
+// Includes post-validate + one-shot corrective rewrite if the model deviates.
 
 const crypto = require("crypto");
 
@@ -8,6 +9,7 @@ const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const MODEL = "gpt-4o-mini";
 const REQ_TIMEOUT_MS = 25000; // ~25s (under Netlify Pro 26s cap)
 const RETRIES = 1;
+const MAX_REWRITES = 1;
 
 exports.handler = async (event) => {
   const rid = (crypto.randomUUID?.() || Math.random().toString(36).slice(2));
@@ -23,22 +25,15 @@ exports.handler = async (event) => {
 
     let payload = {};
     try { payload = JSON.parse(event.body || "{}"); }
-    catch (e) {
-      log("json-parse-error", { message: e.message });
-      return j(400, { ok:false, error:"Invalid JSON body" }, rid);
-    }
+    catch (e) { log("json-parse-error", { message: e.message }); return j(400, { ok:false, error:"Invalid JSON body" }, rid); }
 
-    if (payload.ping === "test") {
-      log("probe-ok");
-      return j(200, { ok:true, echo: payload }, rid);
-    }
+    if (payload.ping === "test") { log("probe-ok"); return j(200, { ok:true, echo: payload }, rid); }
 
     const state = payload.state;
     if (!state || typeof state !== "object") {
       log("no-state");
       return j(400, { ok:false, error:"Missing 'state' in request body" }, rid);
     }
-
     if (!process.env.OPENAI_API_KEY) {
       log("no-openai");
       return j(500, { ok:false, error:"Server not configured (missing OPENAI_API_KEY)" }, rid);
@@ -47,147 +42,218 @@ exports.handler = async (event) => {
     const prompt = buildUserPromptOwnedOnly(state);
     log("prompt-built", { promptLen: prompt.length });
 
-    let lastErr, respBody = "", usage;
-
-    for (let attempt = 0; attempt <= RETRIES; attempt++) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), REQ_TIMEOUT_MS);
-
-        const upstream = await fetch(OPENAI_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: MODEL,
-            messages: [
-              {
-                role: "system",
-                content:
-`You are a Brokerage Trade Agent.
-CRITICAL RULES:
-- ALWAYS output a single JSON object with this exact shape: { "plan": "<string>" }.
-- The "plan" string must follow the provided TEMPLATE exactly (same section names, emojis, and blank lines).
-- Only include information for OWNED POSITIONS (STATE.positions). Do NOT include watchlist or research tickers anywhere.
-- Do NOT include Markdown code fences or any text outside the JSON object.
-- No extra keys; only { "plan": "..." }.`,
-              },
-              { role: "user", content: prompt },
-            ],
-            temperature: 0.2,
-            // Encourage valid JSON from the model:
-            response_format: { type: "json_object" },
-            max_tokens: 1200
-          }),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timer);
-        respBody = await upstream.text();
-        log("openai-response", { status: upstream.status, bodyLen: respBody.length, attempt });
-
-        if (!upstream.ok) {
-          lastErr = new Error(`OpenAI error ${upstream.status}`);
-        } else {
-          // Parse upstream JSON strictly
-          try {
-            const data = JSON.parse(respBody);
-            usage = data?.usage;
-
-            // With response_format=json_object, assistant content is a JSON string or object.
-            // Extract { plan: "<...>" } from message content.
-            const content = data?.choices?.[0]?.message?.content;
-            let packed = content;
-            if (typeof content === "string") {
-              try { packed = JSON.parse(content); } catch { /* keep string */ }
-            }
-            if (!packed || typeof packed.plan !== "string" || !packed.plan.trim()) {
-              throw new Error("Missing or empty 'plan' field in assistant JSON");
-            }
-
-            log("done", { planLen: packed.plan.length });
-            return j(200, { ok:true, plan: packed.plan, meta: { rid, usage } }, rid);
-          } catch (e) {
-            lastErr = new Error(`Upstream JSON validation failed: ${e.message}`);
-          }
-        }
-      } catch (e) {
-        lastErr = e.name === "AbortError" ? new Error("OpenAI request timed out") : e;
-        log("openai-call-error", { message: lastErr.message, attempt });
+    // ---- First attempt
+    const first = await callOpenAIJSON({ prompt, timeoutMs: REQ_TIMEOUT_MS, rid, log });
+    if (first.ok) {
+      const plan = extractPlan(first.data);
+      if (plan && isPlanValid(plan)) {
+        log("done", { attempt: 0, planLen: plan.length });
+        return j(200, { ok: true, plan, meta: { rid, usage: first.data?.usage } }, rid);
       }
     }
 
-    log("returning-error", { message: lastErr?.message, preview: respBody?.slice?.(0, 200) || "" });
-    return j(502, {
-      ok: false,
-      error: lastErr?.message || "Upstream error",
-      meta: { rid, hint: "Likely timeout/validation issue", bodyPreview: respBody?.slice?.(0, 400) || "" },
-    }, rid);
+    // ---- Corrective rewrite (at most once)
+    for (let rewrite = 1; rewrite <= MAX_REWRITES; rewrite++) {
+      const prevPlan = first.ok ? extractPlan(first.data) : "";
+      const critique = validateCritique(prevPlan);
+      const fixPrompt = buildFixPromptOwnedOnly(state, critique, prevPlan);
+      const second = await callOpenAIJSON({ prompt: fixPrompt, timeoutMs: REQ_TIMEOUT_MS, rid, log });
+
+      if (second.ok) {
+        const fixed = extractPlan(second.data);
+        if (fixed && isPlanValid(fixed)) {
+          log("done", { attempt: rewrite, planLen: fixed.length });
+          return j(200, { ok: true, plan: fixed, meta: { rid, usage: second.data?.usage, rewrite } }, rid);
+        }
+      }
+    }
+
+    // If we got here, either OpenAI was slow or validation failed.
+    const errMsg = first.error || "Validation failed";
+    log("returning-error", { message: errMsg });
+    return j(502, { ok: false, error: errMsg, meta: { rid } }, rid);
 
   } catch (err) {
-    log("unhandled", { message: err.message, stack: err.stack });
+    console.error("[agentChat] unhandled", err);
     return j(500, { ok:false, error:"Server error", meta:{ rid } }, rid);
   }
 };
 
+/* ---------------------------- helpers ---------------------------- */
+
 function j(statusCode, body, rid) {
+  return { statusCode, headers: { "content-type": "application/json", "x-rid": rid }, body: JSON.stringify(body) };
+}
+
+function sanitizeStateForPrompt(state) {
   return {
-    statusCode,
-    headers: { "content-type": "application/json", "x-rid": rid },
-    body: JSON.stringify(body),
+    cash: state.cash ?? null,
+    benchmarks: state.benchmarks ?? null,
+    positions: Array.isArray(state.positions) ? state.positions : [],
   };
 }
 
-// === Prompt builder: OWNED POSITIONS ONLY ======================================
+/** Build the primary prompt — OWNED POSITIONS ONLY. */
 function buildUserPromptOwnedOnly(state) {
   return `
-TEMPLATE (copy this exact structure and emojis into the "plan" string):
+Return ONLY a JSON object: {"plan":"<string>"}.
+The "plan" string MUST contain exactly these sections and nothing else:
 
 📊 Market Pulse (Summary)
 
 (Performance vs. relevant index — 🟢 outperform · 🟡 in line · 🔴 lagging)
 
-<One line per OWNED TICKER from STATE.positions; after each line use a hard Markdown line break: two spaces + newline>  
-Ex:
-AMZN (Nasdaq) 🟡 — in line with Nasdaq, modest gain.  
-NVDA (Nasdaq) 🟢 — outperforming Nasdaq, steady above $180.  
-MSFT (Nasdaq) 🔴 — lagging Nasdaq, stuck below $510.  
+Write ONE line per OWNED ticker from STATE.positions.
+After each ticker line, insert a hard Markdown line break (two spaces then newline).  
+Example (structure only):
+AMZN (QQQ) 🟡 — in line with QQQ, modest gain.  
+NVDA (SOXX) 🟢 — outperforming SOXX, stable above $X.  
 
 Summary: 🟢 X outperforming · 🟡 Y in line · 🔴 Z lagging
 
 💵 Cash Deployment Tracker
 
 Brokerage sleeve total value: ≈ <from STATE.cash.sleeve_value if present, else estimate>
-Cash available: <from STATE.cash.cash_available> (<percent of sleeve_value if available>)
-Invested (stocks): <from STATE.cash.invested if present, else sleeve_value - cash_available> (<percent>)
-Active triggers today (strict): <None or a short bullet list based ONLY on owned tickers>
-Playbook: Brief guidance; keep to one or two sentences.
+Cash available: <STATE.cash.cash_available> (<percent of sleeve_value>)
+Invested (stocks): <STATE.cash.invested or sleeve_value - cash_available> (<percent>)
+Active triggers today (strict): <None or short list derived ONLY from owned tickers>
+Playbook: 1–2 short sentences, concise.
 
 1) Portfolio Snapshot — Owned Positions
 
-<One block per OWNED ticker from STATE.positions; keep exactly this bullet format>
+For EACH OWNED ticker in STATE.positions, include exactly this bullet block:
 TICKER — 🟢/🟡/🔴 $<price or “n/a”> | Sentiment: <Bullish/Neutral/Bearish> [⏸️ HOLD or ✅ BUY or ⚠️ TRIM]
-• Position: <qty> @ <avg> | P/L <calc if possible or “n/a”>
-• Flow: <one short line based on sentiment/assumptions; if unknown, keep neutral>
+• Position: <qty> @ <avg> | P/L <calc or “n/a”>
+• Flow: <one short line; if unknown, Neutral>
 • Resistance: <range or “n/a”>
 • Breakout watch: ><level> → <targets> (if applicable)
-• Idea: Short one-liner, ONLY for the owned ticker.
+• Idea: One short actionable line.
 
-IMPORTANT CONSTRAINTS:
-- DO NOT include watchlist or research sections at all.
-- DO NOT mention tickers that are not in STATE.positions in any section.
-- For Market Pulse, only write lines for OWNED tickers and benchmarks inferred from STATE.benchmarks for those tickers.
+HARD CONSTRAINTS:
+- Do NOT include watchlist or research sections or any other sections.
+- Do NOT mention tickers not in STATE.positions.
 - Use percentages like "(38%)" — do NOT use "~".
 - Keep sections separated by a single blank line.
-- Output only one top-level JSON object: { "plan": "<the full formatted plan>" }.
+- Output ONLY the JSON object {"plan":"..."} with NO code fences.
 
-STATE JSON:
-${JSON.stringify({
-    cash: state.cash ?? null,
-    benchmarks: state.benchmarks ?? null,
-    positions: state.positions ?? [],
-  })}
-  `.trim();
+STATE:
+${JSON.stringify(sanitizeStateForPrompt(state))}
+`.trim();
+}
+
+/** Build corrective prompt when the first output drifted. */
+function buildFixPromptOwnedOnly(state, critique, previousPlan) {
+  return `
+Previous attempt did not follow the required format.
+
+Critique:
+${critique}
+
+Rewrite the plan to FIX all issues.
+Return ONLY a JSON object: {"plan":"<string>"}.
+Follow the same constraints as before (owned positions only, exact three sections, no extras).
+
+STATE:
+${JSON.stringify(sanitizeStateForPrompt(state))}
+
+Previous plan (for reference only):
+${JSON.stringify(previousPlan || "")}
+`.trim();
+}
+
+/** Call OpenAI with JSON response_format and a timeout. */
+async function callOpenAIJSON({ prompt, timeoutMs, rid, log }) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    const upstream = await fetch(OPENAI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          {
+            role: "system",
+            content:
+`You are a Brokerage Trade Agent.
+You MUST output a single JSON object with EXACTLY one key: "plan".
+Do not include code fences or extra keys. The "plan" must match the required three sections.`,
+          },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        max_tokens: 1200,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+    const text = await upstream.text();
+    log("openai-response", { status: upstream.status, bodyLen: text.length });
+
+    if (!upstream.ok) {
+      return { ok: false, error: `OpenAI error ${upstream.status}`, text };
+    }
+
+    // With response_format=json_object, the assistant message content is JSON text.
+    const data = JSON.parse(text);
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e.name === "AbortError" ? "OpenAI request timed out" : e.message };
+  }
+}
+
+/** Extract {"plan": "..."} from the OpenAI JSON response. */
+function extractPlan(openaiJSON) {
+  try {
+    const content = openaiJSON?.choices?.[0]?.message?.content;
+    if (!content) return null;
+    if (typeof content === "string") {
+      const obj = JSON.parse(content);
+      return typeof obj?.plan === "string" ? obj.plan : null;
+    }
+    if (typeof content === "object" && typeof content.plan === "string") {
+      return content.plan;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Validate that the plan has ONLY the required sections and no forbidden ones. */
+function isPlanValid(plan) {
+  if (typeof plan !== "string") return false;
+  const mustHave = [
+    "📊 Market Pulse (Summary)",
+    "💵 Cash Deployment Tracker",
+    "1) Portfolio Snapshot — Owned Positions",
+  ];
+  const forbidden = [
+    "2) Entry Radar",
+    "3) Research",
+    "TODAY’S PLAN",
+    "TODAY'S PLAN",
+  ];
+  const hasAll = mustHave.every(s => plan.includes(s));
+  const hasForbidden = forbidden.some(s => plan.includes(s));
+  return hasAll && !hasForbidden;
+}
+
+/** Produce a human-readable critique for the corrective prompt. */
+function validateCritique(plan) {
+  if (!plan) return "- No plan returned.\n";
+  const lines = [];
+  if (!plan.includes("📊 Market Pulse (Summary)")) lines.push("- Missing '📊 Market Pulse (Summary)'.");
+  if (!plan.includes("💵 Cash Deployment Tracker")) lines.push("- Missing '💵 Cash Deployment Tracker'.");
+  if (!plan.includes("1) Portfolio Snapshot — Owned Positions")) lines.push("- Missing '1) Portfolio Snapshot — Owned Positions'.");
+  if (/\b2\)\s*Entry Radar\b/.test(plan)) lines.push("- Contains forbidden '2) Entry Radar' section.");
+  if (/\b3\)\s*Research\b/.test(plan)) lines.push("- Contains forbidden '3) Research' section.");
+  if (/TODAY[’']S PLAN/i.test(plan)) lines.push("- Contains forbidden 'TODAY’S PLAN' header.");
+  return lines.length ? lines.join("\n") : "- Structure present but not exact (ensure headings/emojis/blank lines).";
 }
