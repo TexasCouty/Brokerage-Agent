@@ -122,7 +122,15 @@
     const text = await resp.text();
     addLog({ step: "agentChat POST", status: resp.status, headers: Object.fromEntries(resp.headers.entries()), preview: text.slice(0, 600) });
 
-    if (!resp.ok) throw new Error(`agentChat error ${resp.status}`);
+ +  if (!resp.ok) {
++    let msg = `agentChat error ${resp.status}`;
++    try {
++      const j = JSON.parse(text);
++      if (j?.error) msg += ` — ${j.error}`;
++      if (j?.meta?.bodyPreview) msg += `\n\npreview:\n${j.meta.bodyPreview}`;
++    } catch {}
++    throw new Error(msg);
++  }
     // Try to parse JSON first; if it fails, we’ll surface chip + render raw.
     try {
       const json = JSON.parse(text);
