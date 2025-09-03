@@ -64,9 +64,9 @@
     if (!r.ok || !j.ok) throw new Error(j.error || `planStart ${r.status}`);
     return j; // {status, hash, data?}
   }
-  async function planGenerate(hash, state) {
-    // Background function: returns 202 immediately
-    await fetch("/.netlify/functions/plan-generate", {
+     async function planGenerate(hash, state) {
+     // Background function: returns 202 immediately
+    await fetch("/.netlify/functions/plan-generate-background", {
       method: "POST", headers: { "Content-Type":"application/json" },
       body: JSON.stringify({ hash, state })
     });

@@ -1,25 +1,13 @@
 {
-  "name": "brokerage-agent",
+  "name": "brokerage-trade-agent",
+  "private": true,
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "netlify dev",
+    "build": "echo \"No build step\""
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/TexasCouty/Brokerage-Agent.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/TexasCouty/Brokerage-Agent/issues"
-  },
-  "homepage": "https://github.com/TexasCouty/Brokerage-Agent#readme",
   "dependencies": {
-    "mongodb": "^6.19.0"
+    "@netlify/odb": "^6.19.0",
     "@netlify/blobs": "^6.0.0"
   }
 }
