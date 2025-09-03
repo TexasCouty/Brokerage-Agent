@@ -1,15 +1,14 @@
 // functions/agentChat.js
-// Data-first JSON with 2-stage retry under Netlify Pro (~26s total).
-// Stage A (12s): primary JSON prompt
-// Stage B (12s): corrective prompt if A fails/invalid
-// Tolerant JSON parsing + logging + bodyPreview for UI
+// Data-first JSON with 2-stage retry (12s + 12s), tolerant parsing, deep logging,
+// AND schema coercion: if the model returns partial JSON (e.g., {positions:[...]}),
+// we upgrade it to the full schema using tradeState.
 
 const crypto = require("crypto");
 
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const MODEL = "gpt-4o-mini";
 
-// Split the ~26s budget into two chances
+// ~26s total under Netlify Pro
 const TIME_A_MS = 12000;
 const TIME_B_MS = 12000;
 const MAX_TOKENS = 900;
@@ -41,14 +40,13 @@ exports.handler = async (event) => {
       return j(500, { ok:false, error:"Missing OPENAI_API_KEY" }, rid);
     }
 
-    // Keep only what we need (OWNED only)
     const sanitized = {
       cash: state.cash ?? null,
       benchmarks: state.benchmarks ?? null,
       positions: Array.isArray(state.positions) ? state.positions : [],
     };
 
-    // ---------- Stage A: primary JSON prompt (12s)
+    // ---------- Stage A
     const a = await callOpenAI({
       timeoutMs: TIME_A_MS,
       system: systemMsg(),
@@ -57,30 +55,32 @@ exports.handler = async (event) => {
     });
 
     if (a.ok) {
-      const data = validateShape(a.data);
-      if (data) {
-        log("ok-stageA", { mp: data.market_pulse.length, ps: data.portfolio_snapshot.length });
-        return j(200, { ok:true, data, meta:{ rid, usage: a.usage, stage:"A" } }, rid);
+      const normalizedA = coerceToSchema(a.data, sanitized);
+      const validA = validateShape(normalizedA);
+      if (validA) {
+        log("ok-stageA", { mp: validA.market_pulse.length, ps: validA.portfolio_snapshot.length });
+        return j(200, { ok:true, data: validA, meta:{ rid, usage: a.usage, stage:"A" } }, rid);
       }
       log("invalid-shape-A", { preview: a.preview?.slice?.(0,200) || "" });
     } else {
       log("stageA-fail", { error: a.error, preview: a.preview?.slice?.(0,200) || "" });
     }
 
-    // ---------- Stage B: corrective fallback (12s)
+    // ---------- Stage B (corrective)
     const critique = a.ok ? explainInvalid(a.data) : a.error || "timeout-or-parse-failure";
     const b = await callOpenAI({
       timeoutMs: TIME_B_MS,
-      system: systemMsg(true), // even stricter on no-prose
+      system: systemMsg(true),
       user: correctivePrompt(sanitized, critique),
       log
     });
 
     if (b.ok) {
-      const data = validateShape(b.data);
-      if (data) {
-        log("ok-stageB", { mp: data.market_pulse.length, ps: data.portfolio_snapshot.length });
-        return j(200, { ok:true, data, meta:{ rid, usage: b.usage, stage:"B" } }, rid);
+      const normalizedB = coerceToSchema(b.data, sanitized);
+      const validB = validateShape(normalizedB);
+      if (validB) {
+        log("ok-stageB", { mp: validB.market_pulse.length, ps: validB.portfolio_snapshot.length });
+        return j(200, { ok:true, data: validB, meta:{ rid, usage: b.usage, stage:"B" } }, rid);
       }
       log("invalid-shape-B", { preview: b.preview?.slice?.(0,200) || "" });
       return j(502, { ok:false, error:"Validation failed after retry", meta:{ rid, bodyPreview: b.preview || "" } }, rid);
@@ -100,7 +100,6 @@ function j(statusCode, body, rid) {
   return { statusCode, headers: { "content-type":"application/json", "x-rid": rid }, body: JSON.stringify(body) };
 }
 
-// ultra-short system message for JSON determinism
 function systemMsg(strictNoProse = false) {
   return `You are a Brokerage Trade Agent that returns structured DATA ONLY.
 
@@ -110,13 +109,12 @@ RULES:
 - Include OWNED tickers ONLY (from STATE.positions).${strictNoProse ? " DO NOT include any text outside the JSON under any circumstance." : ""}`;
 }
 
-// compact schema description (field names + types — no big examples)
 function primaryPrompt(state) {
   return `
 STATE (owned only):
 ${JSON.stringify(state)}
 
-SCHEMA (names + types):
+SCHEMA (names + types, no examples):
 {
   "version": number,
   "market_pulse": [
@@ -145,25 +143,22 @@ SCHEMA (names + types):
   ]
 }
 
-Return ONLY one JSON object matching the SCHEMA. Do not add extra fields. version = 1.
+Return ONLY one JSON object matching the SCHEMA. No extra fields. version = 1.
 `.trim();
 }
 
-// corrective prompt—short and forceful
 function correctivePrompt(state, critique) {
   return `
-Your previous reply was invalid because: ${critique}.
+Previous reply invalid because: ${critique}.
+FIX IT NOW.
 
-FIX IT:
-- Return ONLY a single JSON object matching the SCHEMA below.
-- No prose, no markdown, no code fences. If you cannot fill a value, use null.
-- Include OWNED tickers only. version = 1.
+Return ONLY a single JSON object matching the SCHEMA. No prose, no markdown, no code fences.
+Unknowns must be null. Owned tickers only. version = 1.
 
 STATE:
 ${JSON.stringify(state)}
 
-SCHEMA:
-(identical to the one previously provided)
+SCHEMA: (same as before)
 `.trim();
 }
 
@@ -202,17 +197,14 @@ async function callOpenAI({ timeoutMs, system, user, log }) {
     let content = outer?.choices?.[0]?.message?.content;
     const usage = outer?.usage;
 
-    // Log assistant preview
     const preview = typeof content === "string" ? content.slice(0, 350) : JSON.stringify(content || "").slice(0, 350);
     log("assistant-preview", { kind: typeof content, preview });
 
-    // Accept object or JSON string; tolerate fences/extra text by extracting first {...}
     if (content && typeof content === "object") {
       if (content.version == null) content.version = 1;
       return { ok:true, data: content, usage, preview };
     }
     if (typeof content === "string") {
-      // a) direct
       try {
         const obj = JSON.parse(content);
         if (obj && typeof obj === "object") {
@@ -220,7 +212,6 @@ async function callOpenAI({ timeoutMs, system, user, log }) {
           return { ok:true, data: obj, usage, preview };
         }
       } catch {}
-      // b) fenced
       const fence = content.match(/```json\s*([\s\S]*?)```/i) || content.match(/```\s*([\s\S]*?)```/);
       if (fence) {
         try {
@@ -231,7 +222,6 @@ async function callOpenAI({ timeoutMs, system, user, log }) {
           }
         } catch {}
       }
-      // c) first { ... } blob
       const first = content.indexOf("{");
       const last  = content.lastIndexOf("}");
       if (first !== -1 && last > first) {
@@ -251,23 +241,115 @@ async function callOpenAI({ timeoutMs, system, user, log }) {
   }
 }
 
-// minimal validator -> returns normalized object or null
+/* ---------------- coercion + validation ---------------- */
+
+// If the model returns partial JSON (e.g., {positions:[...]}), upgrade it to the full schema.
+function coerceToSchema(obj, state) {
+  const safe = (v, d) => (v === undefined ? d : v);
+  const out = typeof obj === "object" && obj ? { ...obj } : {};
+
+  // version
+  out.version = typeof out.version === "number" ? out.version : 1;
+
+  // portfolio_snapshot
+  if (!Array.isArray(out.portfolio_snapshot)) {
+    // try to derive from positions-like shape
+    const pos = Array.isArray(out.positions) ? out.positions : (Array.isArray(state.positions) ? state.positions : []);
+    out.portfolio_snapshot = pos.map(p => ({
+      ticker: String(p.ticker || "").toUpperCase(),
+      status: mapStatus(p.status || p.action || "HOLD"),
+      sentiment: mapSentiment(p.sentiment || "Neutral"),
+      price: p.price != null ? Number(p.price) : null,
+      position: { qty: numOrNull(p.qty), avg: numOrNull(p.avg) },
+      pl_pct: numOrNull(p.pl_pct),
+      flow: p.flow || "Neutral",
+      resistance: p.resistance || null,
+      breakout_watch: p.breakout_watch ? normalizeBreakout(p.breakout_watch) : null,
+      idea: p.idea || p.notes || ""
+    }));
+  } else {
+    // ensure shape inside
+    out.portfolio_snapshot = out.portfolio_snapshot.map(p => ({
+      ticker: String(p.ticker || "").toUpperCase(),
+      status: mapStatus(p.status || "HOLD"),
+      sentiment: mapSentiment(p.sentiment || "Neutral"),
+      price: numOrNull(p.price),
+      position: { qty: numOrNull(p.position?.qty), avg: numOrNull(p.position?.avg) },
+      pl_pct: numOrNull(p.pl_pct),
+      flow: p.flow || "Neutral",
+      resistance: p.resistance ?? null,
+      breakout_watch: normalizeBreakout(p.breakout_watch),
+      idea: p.idea || ""
+    }));
+  }
+
+  // market_pulse
+  if (!Array.isArray(out.market_pulse)) {
+    const bench = state.benchmarks || {};
+    out.market_pulse = (out.portfolio_snapshot || []).map(p => ({
+      ticker: p.ticker,
+      benchmark: String(bench[p.ticker] || "QQQ"),
+      signal: "inline",
+      note: "holding steady"
+    }));
+  }
+
+  // cash_tracker
+  if (!out.cash_tracker || typeof out.cash_tracker !== "object") {
+    const c = state.cash || {};
+    const sleeve = numOrNull(c.sleeve_value);
+    const cash = numOrNull(c.cash_available);
+    const invested = c.invested != null ? numOrNull(c.invested) : (sleeve != null && cash != null ? Number(sleeve - cash) : null);
+    out.cash_tracker = {
+      sleeve_value: sleeve,
+      cash_available: cash,
+      invested: invested,
+      active_triggers: Array.isArray(out.active_triggers) ? out.active_triggers : [],
+      playbook: typeof out.playbook === "string" ? out.playbook : ""
+    };
+  }
+
+  return out;
+}
+
 function validateShape(obj) {
   if (!obj || typeof obj !== "object") return null;
-  if (!Array.isArray(obj.market_pulse) || !Array.isArray(obj.portfolio_snapshot)) return null;
-  const out = { ...obj };
-  if (typeof out.version !== "number") out.version = 1;
-  if (!out.cash_tracker || typeof out.cash_tracker !== "object") {
-    out.cash_tracker = { sleeve_value: null, cash_available: null, invested: null, active_triggers: [], playbook: "" };
-  }
-  return out;
+  if (!Array.isArray(obj.market_pulse)) return null;
+  if (!obj.cash_tracker || typeof obj.cash_tracker !== "object") return null;
+  if (!Array.isArray(obj.portfolio_snapshot)) return null;
+  return obj;
 }
 
 function explainInvalid(obj) {
   if (!obj || typeof obj !== "object") return "no JSON object returned";
   const miss = [];
   if (!Array.isArray(obj.market_pulse)) miss.push("missing market_pulse[]");
-  if (!Array.isArray(obj.portfolio_snapshot)) miss.push("missing portfolio_snapshot[]");
   if (!obj.cash_tracker) miss.push("missing cash_tracker{}");
+  if (!Array.isArray(obj.portfolio_snapshot)) miss.push("missing portfolio_snapshot[]");
   return miss.length ? miss.join("; ") : "unknown shape issue";
+}
+
+// ---- mappers ----
+function mapStatus(s) {
+  s = String(s || "").toUpperCase();
+  if (s.includes("BUY")) return "BUY";
+  if (s.includes("TRIM") || s.includes("SELL")) return "TRIM";
+  return "HOLD";
+}
+function mapSentiment(s) {
+  s = String(s || "").toLowerCase();
+  if (s.startsWith("bull")) return "Bullish";
+  if (s.startsWith("bear")) return "Bearish";
+  return "Neutral";
+}
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function normalizeBreakout(bw) {
+  if (!bw) return null;
+  const gt = numOrNull(bw.gt ?? bw.level);
+  const targets = Array.isArray(bw.targets) ? bw.targets.map(numOrNull).filter(v => v != null) : [];
+  if (gt == null && targets.length === 0) return null;
+  return { gt, targets };
 }
