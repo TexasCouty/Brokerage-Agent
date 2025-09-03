@@ -1,20 +1,16 @@
 // functions/tradeState.js
-// Works on Netlify Functions runtime that expects Web Response objects
 import { MongoClient } from "mongodb";
 
 const COLL = "trade_state";
 const DOC_ID = "default";
 
-// ---- Runtime adapter: V2 (Request) vs V1 (event) ---------------------------
 export default async function handler(input) {
-  const isV2 = typeof input?.method === "string"; // V2 passes a Request
+  const isV2 = typeof input?.method === "string"; // V2 runtime check
   const req = isV2 ? input : null;
   const event = isV2 ? null : input;
 
   try {
-    // Method + headers
     const method = isV2 ? req.method : event.httpMethod;
-    const headers = isV2 ? Object.fromEntries(req.headers) : event.headers || {};
 
     if (method === "OPTIONS") return res(204, "", cors());
 
@@ -25,11 +21,6 @@ export default async function handler(input) {
     }
 
     if (method === "POST") {
-      const adminKey = headers["x-admin-key"] || headers["X-Admin-Key"];
-      if (adminKey !== process.env.TRADE_ADMIN_KEY) {
-        return res(401, { error: "Unauthorized" });
-      }
-
       const body = await readJsonBody(isV2 ? req : event);
       if (!body || typeof body !== "object") {
         return res(400, { error: "Invalid JSON" });
@@ -51,11 +42,9 @@ export default async function handler(input) {
   }
 }
 
-// ---- helpers ---------------------------------------------------------------
+// --- helpers ---
 async function readJsonBody(src) {
-  // V2: Request; V1: event with string body
   if (typeof src?.json === "function") {
-    // Request
     try { return await src.json(); } catch { return null; }
   }
   try { return JSON.parse(src?.body || "{}"); } catch { return null; }
@@ -82,9 +71,7 @@ function res(status, body, extraHeaders = {}) {
 let _db;
 async function getDb() {
   if (_db) return _db;
-  const uri = process.env.MONGO_URI;
-  if (!uri) throw new Error("MISSING MONGO_URI");
-  const client = new MongoClient(uri);
+  const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   const dbName = process.env.MONGO_DB || "trade_agent";
   _db = client.db(dbName);
